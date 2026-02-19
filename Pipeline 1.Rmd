@@ -28,6 +28,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
 
 
 # Tout le reste passe par BiocManager (qui gère aussi les packages CRAN)
+failed <- c()
 for (pkg in libs) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     tryCatch(
@@ -37,11 +38,12 @@ for (pkg in libs) {
   }
   tryCatch(
     suppressPackageStartupMessages(library(pkg, character.only = TRUE)),
-    error = function(e) message("Échec chargement : ", pkg, "\n", e)
+    error = function(e) failed <<- c(failed, pkg)
   )
 }
+if (length(failed) > 0) cat("Packages non chargés :", paste(failed, collapse = ", "), "\n")
 
-#rm(list = ls())
+rm(list = ls())
 ```
 
 
@@ -51,6 +53,7 @@ Recherche du fichier depuis le GSE
 gse <- getGEO("GSE213406", GSEMatrix = TRUE)
 ```
 
+Pour l'exemple, on prendra ici le GSE213406
 
 ```{r data}
 GSE_num <- readline(prompt = "Entrez le numéro GSE (ex: GSE213406) : ")
@@ -62,40 +65,12 @@ url <- readline(prompt = "Coller l'url: ")
 
 
 counts <- fread(cmd = paste("curl -s", url), header = TRUE)
+
+
+head(counts)
 ```
 
 
-**Epimed**
-```{r}
-library(jsonlite)
-url = "http://epimed.univ-grenoble-alpes.fr/database/query/jobid"
-jobid = fromJSON(url)
-
-
-library(httr)
-url = "http://epimed.univ-grenoble-alpes.fr/database/query/genes/update"
-body = list(jobid=jobid, symbols="ATAD2, BRDT", taxid=9606)
-response = POST(url, body = body, encode = "form")
-```
-
-
-
-
-
-
-
-
-
-```{r data2}
-#file_path <- "C:/Users/noebr/DATA/RNAseq OverLoad/GSE213406_myo_counts.txt.gz"
-#rna_data <- fread(file_path)
-
-rna_data <- counts
-rm(counts)
-rm(url,gse_supp)
-
-head(rna_data)
-```
 
 
 # Traitement
@@ -104,13 +79,17 @@ head(rna_data)
 ## Bulk
 
 ```{r}
+rm(url,gse_supp)
+
+
 conditions <- c("Sham", "Sham", "Sham", "OV", "OV", "OV", "OV")
-
-count_data <- as.data.frame(rna_data[, -1])  # Convertir en data.frame
-rownames(count_data) <- rna_data$Geneid
-
-# Créer l’objet DESeq2
 col_data <- data.frame(condition = factor(conditions))
+
+
+count_data <- as.data.frame(counts[, -1])  
+rownames(count_data) <- counts$Geneid
+# Créer l’objet DESeq2
+
 dds <- DESeqDataSetFromMatrix(countData = count_data,
                               colData = col_data,
                               design = ~ condition)
@@ -123,8 +102,12 @@ res <- results(dds, contrast = c("condition", "OV", "Sham"))
 res <- res[order(res$pvalue), ]
 
 
-#head(res)
+head(res)
 ```
+
+Pour l'analyse en bulk avec Deseq2, on a besoin des raw_counts et d'un vecterus du plan d'éxpérience (ici les 3 premieres colonne était le groupe contrôle, les 4 autres étaient les souris Overload). Deseq2 a besoin d'un format data.frame pour fonctionner et que le nom de chaque lignes soient le nom d'un gène. Les conditions passe ensuite en dataframes en tant que facteur
+
+
 
 ```{r}
 gene_symbols <- mapIds(
@@ -148,14 +131,20 @@ gene_symbols_all <- mapIds(
 # Find which Ensembl IDs had multiple matches
 multi <- gene_symbols_all[lengths(gene_symbols_all) > 1]
 head(multi)
+
+rm(list = c("conditions", "col_data", "counts"))
 ```
 
+Pour s'assurer de l'interprétabilité, on transforme tous les identifians de gène de ce jeu de donnée par leur identifiant unique (gene symboles unqiue au niveau internationale). On sélectionne la première occurence quand els gèens sont maldéfinis et on peut controler les ont du être sélectionné
 
 ### Volcano plot
 ```{r}
+rm(multi)
+
+
 degs <- res[res$pval < 0.05 & abs(res$log2FoldChange) > 1, ]
 
-top_genes <- head(rownames(res), 10)  # Top 30 triés par pvalue
+top_genes <- head(rownames(res), 10)  # Top 10 triés par pvalue
 
 labels_filtered <- ifelse(rownames(as.data.frame(res)) %in% top_genes,
                           gene_symbols,
@@ -186,8 +175,10 @@ volcano <- EnhancedVolcano(
 
 print(volcano)
 ```
+On effectue un premier volcano plot nous donnant une idée de quelles gènes sont exprimés différentiellemetn en anntons les 10 gènes les plus significatifs
 
-```{r}
+
+```{r plotly, message=FALSE, warning=FALSE}
 res_df <- as.data.frame(res)
 res_df$gene    <- gene_symbols
 res_df$ensembl <- rownames(res)
@@ -263,8 +254,9 @@ volcano_plotly %>%   toWebGL()
 ```
 
 
+On obtient un volcano plot interactif (pour ceux ayant plotly)
 
-
+A partir d'ici, on peut passer directement à l'analyse ORA et GSEA [ici](#cible)
 
 
 ## Single-Cell
@@ -522,21 +514,156 @@ voir [ici](https://satijalab.org/seurat/articles/integration_introduction)
 
 
 
-## ORA et GSEA
+## ORA et GSEA   {#cible}
 
 Récupération du fichier gene_pathways depuis github.
 
 ```{r}
+
+
+
 data <- read.delim("https://raw.githubusercontent.com/brockern/RNAseq_LBFA_V1/main/Gene_pathways.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
 ```
 
 
-### ORA
+Epimed pour les différents gènes 
+
+
+**Epimed**
+```{r}
+url = "http://epimed.univ-grenoble-alpes.fr/database/query/jobid"
+jobid = fromJSON(url)
+
+
+url = "http://epimed.univ-grenoble-alpes.fr/database/query/genes/update"
+body = list(jobid=jobid, symbols="ATAD2, BRDT", taxid=9606)
+response = POST(url, body = body, encode = "form")
+```
+
+
+Si besoin de récupérer des identifiants unique de gènes souris, mettre el nom des gènes noté dans symbols et rempalcer taxid=9606 par 10090
+
+On utilise ici pour les analsyes suivantes des pathways prédéfinis du poitn de vue métaboliques
+
+### ORA (analyse de sureprésentation)
+
+
+
+
+```{r}
+term2gene <- data[, c("pathway", "gene_symbol.10090.")]
+
+
+res$symbol <- gene_symbols
+
+DEGs <- subset(res, padj < 0.05 & abs(log2FoldChange) > 1)
+tes_DEGs <- na.omit(DEGs$symbol)
+
+```
+
+```{r}
+
+ora_result <- enricher(
+  gene = tes_DEGs,          # vecteur de tes gènes différentiellement exprimés
+  TERM2GENE = term2gene,
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2
+)
+
+head(ora_result)
+```
+
+
+On cherhce a regarder dans un des pathways significatifs (ici OXPHOS) comment bouge les gènes associés
+```{r}
+oxphos_genes <- strsplit(ora_result@result["OXPHOS", "geneID"], "/")[[1]]
+
+res_symbols <- as.data.frame(res)
+res_symbols$symbol <- gene_symbols
+
+res_symbols %>%
+  filter(symbol %in% oxphos_genes) %>%
+  summarise(up = sum(log2FoldChange > 0, na.rm=T),
+            down = sum(log2FoldChange < 0, na.rm=T))
+```
+
 
 ### GSEA
 
 
 
+```{r}
+
+pathways <- split(term2gene$gene_symbol.10090., term2gene$pathway)
+
+res_gsea <- as.data.frame(res)
+
+res_gsea <- res_gsea[order(abs(res_gsea$log2FoldChange), decreasing = TRUE), ]
+res_gsea <- res_gsea[!duplicated(res_gsea$symbol), ]
+
+
+ranked_genes <- setNames(res_gsea$log2FoldChange, res_gsea$symbol)
+ranked_genes <- sort(ranked_genes, decreasing = TRUE)
+
+# Lancer fgsea
+gsea_result <- fgsea(
+  pathways  = pathways,
+  stats     = ranked_genes
+)
+
+gsea_result
+```
+
+
+#### NES Graphes
+
+
+```{r}
+gsea_df <- as.data.frame(gsea_result)
+
+# Ordonner par NES
+gsea_df <- gsea_df[order(gsea_df$NES), ]
+
+# Colonne de significativité
+gsea_df$significant <- ifelse(gsea_df$padj < 0.05, "padj < 0.05", "NS")
+
+# Plot
+ggplot(gsea_df, aes(x = NES, y = reorder(pathway, NES), fill = significant)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("padj < 0.05" = "#D73027", "NS" = "grey70")) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "GSEA - Metabolic Pathways",
+    x = "Normalized Enrichment Score (NES)",
+    y = NULL,
+    fill = NULL
+  ) +
+  theme_classic() +
+  theme(axis.text.y = element_text(size = 10))
+```
+
+
+#### ENrichement plot
+
+
+```{r}
+gsea_result2 <- GSEA(
+  geneList  = ranked_genes,
+  TERM2GENE = term2gene,
+  pvalueCutoff = 1,
+  eps = 0
+)
+
+
+gseaplot2(gsea_result2, 
+          geneSetID = "LTP",
+          title = "LTP",
+          color = "green",
+          base_size = 12,
+          rel_heights = c(1.5, 0.5, 1),
+          subplots = 1:3,
+          pvalue_table = FALSE)
+```
 
 
 
