@@ -63,6 +63,7 @@ print(gse_supp)
 
 url <- readline(prompt = "Coller l'url: ")
 
+url <- "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE213nnn/GSE213406/suppl//GSE213406_myo_counts.txt.gz"
 
 counts <- fread(cmd = paste("curl -s", url), header = TRUE)
 
@@ -73,10 +74,35 @@ head(counts)
 
 
 
+
+
+
 # Traitement
 
 
 ## Bulk
+
+
+```{r PCA}
+
+
+keep <- rowSums(counts >= 10) >= 2
+counts_filt <- counts[keep, ]
+
+log_counts <- log2(counts_filt + 1)
+pca <- prcomp(t(log_counts), scale. = TRUE)
+
+plot(pca$x[,1], pca$x[,2],
+     col = condition,
+     pch = 19,
+     xlab = paste0("PC1 (", round(summary(pca)$importance[2,1]*100,1), "%)"),
+     ylab = paste0("PC2 (", round(summary(pca)$importance[2,2]*100,1), "%)"))
+
+legend("topright", legend = levels(condition),
+       col = seq_along(levels(condition)), pch = 19)
+
+```
+
 
 ```{r}
 rm(url,gse_supp)
@@ -107,6 +133,40 @@ head(res)
 
 Pour l'analyse en bulk avec Deseq2, on a besoin des raw_counts et d'un vecterus du plan d'éxpérience (ici les 3 premieres colonne était le groupe contrôle, les 4 autres étaient les souris Overload). Deseq2 a besoin d'un format data.frame pour fonctionner et que le nom de chaque lignes soient le nom d'un gène. Les conditions passe ensuite en dataframes en tant que facteur
 
+##### PCA
+
+
+```{r}
+# VST blind sur ton dds existant
+vst_pca <- assay(vst(dds, blind = TRUE))
+
+# Convertir rownames en symboles
+rownames(vst_pca) <- gene_symbols[rownames(vst_pca)]
+vst_pca <- vst_pca[!is.na(rownames(vst_pca)), ]
+vst_pca <- vst_pca[!duplicated(rownames(vst_pca)), ]
+
+# PCA
+pca <- prcomp(t(vst_pca), scale. = FALSE)
+
+# Dataframe
+pca_df <- as.data.frame(pca$x[, 1:2])
+pca_df$sample <- rownames(pca_df)
+pca_df$group <- gsub("[0-9]", "", pca_df$sample)
+
+# Variance expliquée
+var_explained <- round(summary(pca)$importance[2, 1:2] * 100, 1)
+
+# Plot
+ggplot(pca_df, aes(x = PC1, y = PC2, color = group, label = sample)) +
+  geom_point(size = 4) +
+  ggrepel::geom_text_repel() +
+  scale_color_manual(values = c("OV" = "#D73027", "Sham" = "#4575B4")) +
+  labs(title = "PCA - OV vs Sham",
+       x = paste0("PC1 (", var_explained[1], "%)"),
+       y = paste0("PC2 (", var_explained[2], "%)"),
+       color = NULL) +
+  theme_classic()
+```
 
 
 ```{r}
@@ -259,17 +319,10 @@ On obtient un volcano plot interactif (pour ceux ayant plotly)
 A partir d'ici, on peut passer directement à l'analyse ORA et GSEA [ici](#cible)
 
 
+
 ## Single-Cell
 
-
-
 ```{r}
-#d <- readRDS("GSE183802_snRNA-seq_data_CTL_and_denervation.rds") 
-#pbmc.data <- Read10X(data.dir = "../data/pbmc3k/filtered_gene_bc_matrices/hg19/")
-#pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200) #Depuis le raw
-```
-
-```{r sc-data}
 
 pbmc.data <- Read10X(data.dir = "C:\\Users\\noebr\\Desktop\\RNA-Seq\\scRNAseq\\filtered_gene_bc_matrices\\hg19")
 pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
@@ -281,7 +334,7 @@ pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3
 
 #### Quality Controle
 
-```{r QC}
+```{r}
 pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
 
 
@@ -295,7 +348,7 @@ plot1 + plot2
 On filtre les résultats en focntion de notre tissues
 
 
-```{r FIltre QC}
+```{r}
 pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
 ```
  
@@ -312,7 +365,7 @@ pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent
  
 #### Normalisation des données
 
-```{r normalisation}
+```{r}
 pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 10000)
 ```
 
@@ -322,7 +375,7 @@ pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor 
   
 ##### Calcul des gènes les plus variables
 
-```{r gènes les plsu variables }
+```{r}
 pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
 top10 <- head(VariableFeatures(pbmc), 10)
 
@@ -337,7 +390,7 @@ plot2
   
 #### Scaling des données 
 
-```{r scaling}
+```{r}
 all.genes <- rownames(pbmc)
 pbmc <- ScaleData(pbmc, features = all.genes)
 ```
@@ -347,30 +400,30 @@ Cette étape est l'étape final de préparation à la PCA
 #### Visualisation 
 
 
-```{r pca}
+```{r}
 pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
 ```
 
 
 
-```{r pca sur plan}
+```{r}
 DimPlot(pbmc, reduction = "pca")
 ```
 
 Ce graphe permet de visualiser les 2 premières dimension de la PCA
 
-```{r heatmpa}
+```{r}
 DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE)
 
 
-
+#rempl  cer 1:3 par 1:15, le 1:3 sert seulemetn à l'export html
 ```
 
 Cela permet de voir quelles sont les gènes les plus explciatifs des premières dimensions de la PCA. Pour savoir combien de dimension garder, on peut utiliser 2 méthodes : JAckStrawPlot (très efficace et précis, mais coûteux en temps de calcul) ou ElbowPlot
 
 ##### JackStraw
 
-```{r Jackstraw}
+```{r}
 pbmc <- JackStraw(pbmc, num.replicate = 100)
 pbmc <- ScoreJackStraw(pbmc, dims = 1:20)
 
@@ -381,7 +434,7 @@ Le nombre de dimension dépend du dataset entre 15 et 40. On ne garde que les di
 
 ##### ElbowPlot
 
-```{r Elbow}
+```{r}
 
 ElbowPlot(pbmc)
 
@@ -391,7 +444,7 @@ On peut noter que les dernière dimensions peuvent donnée des informations pour
 
 #### Clustering
 
-```{r Knn}
+```{r}
 
 pbmc <- FindNeighbors(pbmc, dims = 1:10)
 pbmc <- FindClusters(pbmc, resolution = 0.5, algorithm = 1)
@@ -407,7 +460,7 @@ On peut sélectionner l'algorithme que l'on shoauite (Louvain ou SLM; voir [ici]
 
 On va utiliser une UMAP pour **aider** à identifier les différent type cellulaires.
 
-```{r UMAP}
+```{r}
 pbmc <- RunUMAP(pbmc, dims = 1:10)
 DimPlot(pbmc, reduction = "umap")
 ```
@@ -416,18 +469,18 @@ DimPlot(pbmc, reduction = "umap")
 
 Ces précédentes étapes étaient intenses en calculs, on sauve donc le résultat quelque aprt pour ne plus avoir à le refaire.
 
-```{r sauvegarde}
+```{r}
 # saveRDS(pbmc, file = "../output/pbmc_tutorial.rds")
 ```
 
-#### Identifications des cellules
+### Identifications des cellules
 ##### Identification des Biomarkers différentiellement exprimés
 
 ###### Identification d'un cluster
 
 
 Pour distinguer le cluster 2 par exemple (différence avec tout les autres)
-```{r marqueurs clsuter}
+```{r}
 
 
 cluster2.markers <- FindMarkers(pbmc, ident.1 = 2)
@@ -439,7 +492,7 @@ On peut utiliser différente méthode de calcul (wilcoxon apr défault ou bien r
 
 Pour distinguer le cluster 5 par exemple du cluster 0 et 3
 
-```{r différence entre certains clsuter}
+```{r}
 cluster5.markers <- FindMarkers(pbmc, ident.1 = 5, ident.2 = c(0, 3))
 head(cluster5.markers, n = 5)
 
@@ -451,7 +504,7 @@ head(cluster5.markers, n = 5)
 
 Pour distinguer chaque marker de chaque cluster comparer au reste des cellules
 
-```{r différence entre tous les clsuter}
+```{r}
 pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, verbose=TRUE)
 pbmc.markers %>%
     group_by(cluster) %>%
@@ -462,7 +515,7 @@ pbmc.markers %>%
 Une fois les marqueurs obtenues, on peut les visualiser afin de pouvoir attribuer des types cellulaires à nos clusters.
 
 
-```{r plot de certains marquerus apr clsuter}
+```{r}
 VlnPlot(pbmc, features = c("MS4A1", "CD79A"))
 ```
 
@@ -471,7 +524,7 @@ Il suffit de remplacer par le nom de gènes d'intérêt.
 
 Pour les placer sur la UMAP :
 
-```{r marquerus sur la Umap}
+```{r}
 FeaturePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
     "CD8A"))
 ```
@@ -479,7 +532,7 @@ FeaturePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3
 
 Pour voir sur la Heatmap par cluster
 
-```{r heatmpa par clsuter }
+```{r}
 pbmc.markers %>%
     group_by(cluster) %>%
     dplyr::filter(avg_log2FC > 1) %>%
@@ -493,7 +546,7 @@ DoHeatmap(pbmc, features = top10$gene) + NoLegend()
 
 ###### Remplacement du nom sur la UMAP
 
-```{r identification Umap}
+```{r}
 new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono",
     "NK", "DC", "Platelet")
 names(new.cluster.ids) <- levels(pbmc)
@@ -509,11 +562,6 @@ DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 voir [ici](https://satijalab.org/seurat/articles/integration_introduction)
 
 
-
-
-
-
-
 ## ORA et GSEA   {#cible}
 
 Récupération du fichier gene_pathways depuis github.
@@ -526,19 +574,6 @@ data <- read.delim("https://raw.githubusercontent.com/brockern/RNAseq_LBFA_V1/ma
 ```
 
 
-Epimed pour les différents gènes 
-
-
-**Epimed**
-```{r}
-url = "http://epimed.univ-grenoble-alpes.fr/database/query/jobid"
-jobid = fromJSON(url)
-
-
-url = "http://epimed.univ-grenoble-alpes.fr/database/query/genes/update"
-body = list(jobid=jobid, symbols="ATAD2, BRDT", taxid=9606)
-response = POST(url, body = body, encode = "form")
-```
 
 
 Si besoin de récupérer des identifiants unique de gènes souris, mettre el nom des gènes noté dans symbols et rempalcer taxid=9606 par 10090
@@ -566,8 +601,8 @@ tes_DEGs <- na.omit(DEGs$symbol)
 ora_result <- enricher(
   gene = tes_DEGs,          # vecteur de tes gènes différentiellement exprimés
   TERM2GENE = term2gene,
-  pvalueCutoff = 0.05,
-  qvalueCutoff = 0.2
+ # pvalueCutoff = 0.05,
+  #qvalueCutoff = 0.2
 )
 
 head(ora_result)
@@ -576,7 +611,7 @@ head(ora_result)
 
 On cherhce a regarder dans un des pathways significatifs (ici OXPHOS) comment bouge les gènes associés
 ```{r}
-oxphos_genes <- strsplit(ora_result@result["OXPHOS", "geneID"], "/")[[1]]
+oxphos_genes <- strsplit(ora_result@result["PPP", "geneID"], "/")[[1]]
 
 res_symbols <- as.data.frame(res)
 res_symbols$symbol <- gene_symbols
@@ -666,6 +701,185 @@ gseaplot2(gsea_result2,
 ```
 
 
+#### LEading edges
+
+
+On cherche quelles sont les gènes ayant le pls d'effet sur une voie métabolqiue
+
+
+```{r}
+leading_edge <- gsea_result[, c("pathway", "NES", "padj", "leadingEdge")]
+
+# Pour une voie spécifique
+gsea_result[gsea_result$pathway == "FAO", "leadingEdge"][[1]]
+
+
+sig_pathways <- gsea_result[gsea_result$padj < 0.05, ]
+
+all_leading_edge <- lapply(sig_pathways$leadingEdge, unlist)
+names(all_leading_edge) <- sig_pathways$pathway
+
+# Voir tous les gènes uniques
+all_genes <- unique(unlist(all_leading_edge))
+
+```
+```{r}
+
+# Extraire les données d'expression normalisées pour ces gènes
+vst_matrix <- assay(rlog(dds))  # ou assay(rlog(dds)) si tu as un objet DESeq2
+
+# Filtrer sur les leading edge genes
+heatmap_matrix <- vst_matrix[rownames(vst_matrix) %in% rownames(res_gsea)[res_gsea$symbol %in% all_genes], ]
+
+# Remplacer les rownames Ensembl par les symboles
+rownames(heatmap_matrix) <- res_gsea[rownames(heatmap_matrix), "symbol"]
+
+leading_edge_vec <- unlist(all_leading_edge)
+pathway_vec <- rep(names(all_leading_edge), sapply(all_leading_edge, length))
+
+# Supprimer les doublons
+dup <- duplicated(leading_edge_vec)
+leading_edge_vec <- leading_edge_vec[!dup]
+pathway_vec <- pathway_vec[!dup]
+
+annot_row <- data.frame(Pathway = pathway_vec)
+rownames(annot_row) <- leading_edge_vec
+
+# Filtrer sur les gènes présents dans la heatmap
+annot_row <- annot_row[rownames(heatmap_matrix), , drop = FALSE]
+
+
+pheatmap(heatmap_matrix,
+         scale = "row",
+         annotation_row = annot_row,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         clustering_method = "ward.D2",
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "Leading Edge Genes - Metabolic Pathways z score")
+```
+
+###### Facteur de transcritpion
+
+```{r}
+
+# Charger CollecTRI pour la souris
+collectri <- get_collectri(organism = "mouse", split_complexes = FALSE)
+
+
+
+mat_symbols <- mat
+rownames(mat_symbols) <- gene_symbols[rownames(mat_symbols)]
+
+# Supprimer les NA
+mat_symbols <- mat_symbols[!is.na(rownames(mat_symbols)), ]
+
+# Supprimer les doublons
+mat_symbols <- mat_symbols[!duplicated(rownames(mat_symbols)), ]
+
+# Relancer
+tf_activities <- run_ulm(
+  mat       = mat_symbols,
+  network   = collectri,
+  .source   = "source",
+  .target   = "target",
+  .mor      = "mor",
+  minsize   = 5
+)
+
+# Calculer le score moyen par TF et condition
+tf_summary <- tf_activities %>%
+  mutate(group = gsub("[0-9]", "", condition)) %>%  # enlève les chiffres → "OV" ou "Sham"
+  group_by(source, group) %>%
+  summarise(mean_score = mean(score), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = group, values_from = mean_score) %>%
+  mutate(diff = OV - Sham) %>%
+  arrange(desc(abs(diff)))
+
+
+top_tf <- tf_summary %>% slice_max(abs(diff), n = 20)
+
+ggplot(top_tf, aes(x = diff, y = reorder(source, diff), 
+                   fill = diff > 0)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("TRUE" = "#D73027", "FALSE" = "#4575B4"),
+                    labels = c("Moins actif en OV", "Plus actif en OV")) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Activité différentielle des TF - OV vs Sham",
+       x = "Différence de score (OV - Sham)",
+       y = NULL, fill = NULL) +
+  theme_classic()
+
+
+
+top_tf_names <- top_tf$source
+
+# Filtrer CollecTRI pour ces TF et leurs cibles dans ton leading edge
+tf_metabolic <- collectri %>%
+  filter(source %in% top_tf_names,
+         target %in% all_genes) %>%
+  arrange(source)
+
+
+
+tf_mat <- tf_metabolic %>%
+  select(source, target, mor) %>%
+  pivot_wider(names_from = target, values_from = mor, values_fill = 0) %>%
+  column_to_rownames("source")
+
+pheatmap(as.matrix(tf_mat),
+         color = colorRampPalette(c("#4575B4", "white", "#D73027"))(3),
+         breaks = c(-1.5, -0.5, 0.5, 1.5),
+         legend_breaks = c(-1, 1),
+         legend_labels = c("Répression", "Activation"),
+         show_colnames = TRUE,
+         show_rownames = TRUE,
+         clustering_method = "ward.D2",
+         main = "Régulation TF - Gènes métaboliques")
+```
+
+
+```{r}
+tf_repressed <- tf_summary %>%
+    filter(diff < 0) %>%
+    arrange(diff)
+```
+Les facterus de transcriptions pouvant réguler le métabolismes auraient davantages tendance avoir un score plus bas en Overload qu'en Shame Op.
+
+```{r}
+tf_repressed_metabolic <- collectri %>%
+  filter(source %in% tf_repressed$source,
+         target %in% all_genes) %>%
+  arrange(desc(table(source)[source]))
+
+
+tf_repressed_metabolic <- tf_repressed_metabolic %>%
+  rename(Mode_of_regulation = mor) %>%
+  mutate(Mode_of_regulation = case_when(
+    Mode_of_regulation ==  1  ~ "active",
+    Mode_of_regulation == -1  ~ "reprime",
+    TRUE ~ NA_character_
+  ))
+```
+
+Ce sont els TF les moins actifs, ayant pour cibles les gènes métaboliques.
+
+
+On voit ici ceux yant le plsu de connexions à nos gènes cibles
+
+```{r}
+tf_repressed_metabolic %>%
+    group_by(source) %>%
+    summarise(n_targets = n()) %>%
+    left_join(tf_summary, by = "source") %>%
+    arrange(diff) %>%  # les plus réprimés en OV en premier
+    head(20)
+```
+
+
+
+
+
 
 # Session Info 
 ```{r session info}
@@ -685,7 +899,6 @@ session_info_to_csv <- function(file = "session.info.csv") {
     stringsAsFactors = FALSE
   )
 
-  # Loaded packages (otherPkgs is a named list of packageDescription-like lists)
   loaded <- if (length(si$otherPkgs) > 0) {
     data.frame(
       section = "loaded_package",
@@ -698,7 +911,6 @@ session_info_to_csv <- function(file = "session.info.csv") {
                stringsAsFactors = FALSE)
   }
 
-  # Base packages (basePkgs is simply a character vector)
   base <- data.frame(
     section = "base_package",
     name    = si$basePkgs,
@@ -708,9 +920,12 @@ session_info_to_csv <- function(file = "session.info.csv") {
 
   out <- rbind(general, loaded, base)
   write.csv(out, file = file, row.names = FALSE)
-  invisible(out)  # good practice: return silently for use in pipes etc.
+  invisible(out)  
 }
 
 session_info_to_csv()
+
+
+sessionInfo()
 ```
 
