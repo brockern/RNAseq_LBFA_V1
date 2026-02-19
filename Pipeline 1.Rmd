@@ -1,0 +1,589 @@
+---
+title: "RNaseq pipeline"
+author: "Brocker Noé;"
+date: "2026-02-18"
+output: html_document
+---
+
+
+Setup
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#rm(list = ls())
+set.seed(42)
+
+libs <- c("SummarizedExperiment", "DESeq2", "ExploreModelMatrix",
+          "data.table", "ComplexHeatmap", "apeglm", "GEOquery",
+          "tidyverse", "Seurat", "fgsea", "cowplot", "reshape2",
+          "corrplot", "clustree", "EnhancedVolcano",
+          "clusterProfiler", "org.Mm.eg.db", "enrichplot", 
+          "msigdbr", "plotly", "openxlsx", "jsonlite", "httr")
+
+# Installation de BiocManager si nécessaire
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+
+# Tout le reste passe par BiocManager (qui gère aussi les packages CRAN)
+for (pkg in libs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    tryCatch(
+      BiocManager::install(pkg, ask = FALSE, update = FALSE),
+      error = function(e) message("Échec installation : ", pkg, "\n", e)
+    )
+  }
+  tryCatch(
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE)),
+    error = function(e) message("Échec chargement : ", pkg, "\n", e)
+  )
+}
+
+#rm(list = ls())
+```
+
+
+Recherche du fichier depuis le GSE
+
+```{r metadata}
+gse <- getGEO("GSE213406", GSEMatrix = TRUE)
+```
+
+
+```{r data}
+GSE_num <- readline(prompt = "Entrez le numéro GSE (ex: GSE213406) : ")
+
+gse_supp <- getGEOSuppFiles(GSE_num, fetch_files = FALSE)
+print(gse_supp)
+
+url <- readline(prompt = "Coller l'url: ")
+
+
+counts <- fread(cmd = paste("curl -s", url), header = TRUE)
+```
+
+
+**Epimed**
+```{r}
+library(jsonlite)
+url = "http://epimed.univ-grenoble-alpes.fr/database/query/jobid"
+jobid = fromJSON(url)
+
+
+library(httr)
+url = "http://epimed.univ-grenoble-alpes.fr/database/query/genes/update"
+body = list(jobid=jobid, symbols="ATAD2, BRDT", taxid=9606)
+response = POST(url, body = body, encode = "form")
+```
+
+
+
+
+
+
+
+
+
+```{r data2}
+#file_path <- "C:/Users/noebr/DATA/RNAseq OverLoad/GSE213406_myo_counts.txt.gz"
+#rna_data <- fread(file_path)
+
+rna_data <- counts
+rm(counts)
+rm(url,gse_supp)
+
+head(rna_data)
+```
+
+
+# Traitement
+
+
+## Bulk
+
+```{r}
+conditions <- c("Sham", "Sham", "Sham", "OV", "OV", "OV", "OV")
+
+count_data <- as.data.frame(rna_data[, -1])  # Convertir en data.frame
+rownames(count_data) <- rna_data$Geneid
+
+# Créer l’objet DESeq2
+col_data <- data.frame(condition = factor(conditions))
+dds <- DESeqDataSetFromMatrix(countData = count_data,
+                              colData = col_data,
+                              design = ~ condition)
+
+dds <- dds[rowSums(counts(dds)) > 1, ]
+
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", "OV", "Sham"))
+
+res <- res[order(res$pvalue), ]
+
+
+#head(res)
+```
+
+```{r}
+gene_symbols <- mapIds(
+  org.Mm.eg.db,
+  keys      = rownames(res),
+  column    = "SYMBOL",
+  keytype   = "ENSEMBL",
+  multiVals = "first"
+)
+gene_symbols[is.na(gene_symbols)] <- rownames(res)[is.na(gene_symbols)]
+
+
+gene_symbols_all <- mapIds(
+  org.Mm.eg.db,
+  keys = rownames(res),
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "list"
+)
+
+# Find which Ensembl IDs had multiple matches
+multi <- gene_symbols_all[lengths(gene_symbols_all) > 1]
+head(multi)
+```
+
+
+### Volcano plot
+```{r}
+degs <- res[res$pval < 0.05 & abs(res$log2FoldChange) > 1, ]
+
+top_genes <- head(rownames(res), 10)  # Top 30 triés par pvalue
+
+labels_filtered <- ifelse(rownames(as.data.frame(res)) %in% top_genes,
+                          gene_symbols,
+                          "")
+
+
+
+volcano <- EnhancedVolcano(
+  as.data.frame(res),
+  lab            = labels_filtered,
+  x              = "log2FoldChange",
+  y              = "padj",
+  pCutoff        = 0.05,
+  FCcutoff       = 1,
+  title          = "Volcano Plot – OV vs Sham",
+  subtitle       = bquote(italic("Mus musculus")),
+  col            = c("grey70", "#2196F3", "#FF9800", "#F44336"),
+  colAlpha       = 0.6,
+  pointSize      = 2.0,
+  labSize        = 3.5,
+  drawConnectors = TRUE,
+  widthConnectors= 0.5,
+  xlim           = c(-8, 8),
+  legendPosition = "right",
+  max.overlaps = 130
+
+)
+
+print(volcano)
+```
+
+```{r}
+res_df <- as.data.frame(res)
+res_df$gene    <- gene_symbols
+res_df$ensembl <- rownames(res)
+
+# Remplacer les padj NA par 1 pour l'affichage
+res_df$padj[is.na(res_df$padj)] <- 1
+
+# 2. Catégoriser les gènes
+res_df$category <- case_when(
+  res_df$padj < 0.05 & res_df$log2FoldChange >  1 ~ "Upregulé",
+  res_df$padj < 0.05 & res_df$log2FoldChange < -1 ~ "Downregulé",
+  TRUE                                              ~ "NS"
+)
+
+# 3. Couleurs
+color_map <- c(
+  "Upregulé"   = "#F44336",
+  "Downregulé" = "#2196F3",
+  "NS"         = "grey70"
+)
+
+# 4. Volcano plotly
+volcano_plotly <- plot_ly(
+  data   = res_df,
+  x      = ~log2FoldChange,
+  y      = ~-log10(padj),
+  type   = "scatter",
+  mode   = "markers",
+  color  = ~category,
+  colors = color_map,
+  alpha  = 0.6,
+  marker = list(size = 5),
+  
+  # Tooltip interactif au survol
+  text = ~paste0(
+    "<b>", gene, "</b><br>",
+    "Ensembl : ", ensembl, "<br>",
+    "log2FC : ", round(log2FoldChange, 3), "<br>",
+    "padj : ", formatC(padj, format = "e", digits = 2), "<br>",
+    "baseMean : ", round(baseMean, 1)
+  ),
+  hoverinfo = "text"
+) %>%
+  
+  # Lignes de seuil
+  add_segments(x = -8,  xend = 8,  y = -log10(0.05), yend = -log10(0.05),
+               line = list(dash = "dash", color = "black", width = 1),
+               showlegend = FALSE, hoverinfo = "none") %>%
+  add_segments(x = 1,   xend = 1,  y = 0, yend = max(-log10(res_df$padj), na.rm = TRUE),
+               line = list(dash = "dash", color = "black", width = 1),
+               showlegend = FALSE, hoverinfo = "none") %>%
+  add_segments(x = -1,  xend = -1, y = 0, yend = max(-log10(res_df$padj), na.rm = TRUE),
+               line = list(dash = "dash", color = "black", width = 1),
+               showlegend = FALSE, hoverinfo = "none") %>%
+  
+  # Mise en forme
+  layout(
+    title = list(text = "<b>Volcano Plot – OV vs Sham</b><br><i>Mus musculus</i>",
+                 font = list(size = 16)),
+    xaxis = list(title = "log2 Fold Change", range = c(-8, 8),
+                 zeroline = TRUE, zerolinecolor = "lightgrey"),
+    yaxis = list(title = "-log10(padj)"),
+    legend = list(title = list(text = "<b>Catégorie</b>")),
+    plot_bgcolor  = "white",
+    paper_bgcolor = "white",
+    hovermode     = "closest"
+  )
+
+# 5. Affichage
+volcano_plotly %>%   toWebGL()
+
+
+```
+
+
+
+
+
+
+## Single-Cell
+
+
+
+```{r}
+#d <- readRDS("GSE183802_snRNA-seq_data_CTL_and_denervation.rds") 
+#pbmc.data <- Read10X(data.dir = "../data/pbmc3k/filtered_gene_bc_matrices/hg19/")
+#pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200) #Depuis le raw
+```
+
+```{r sc-data}
+
+pbmc.data <- Read10X(data.dir = "C:\\Users\\noebr\\Desktop\\RNA-Seq\\scRNAseq\\filtered_gene_bc_matrices\\hg19")
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+```
+
+
+### Downstream Analysis 
+
+
+#### Quality Controle
+
+```{r QC}
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+
+
+
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+```
+
+On filtre les résultats en focntion de notre tissues
+
+
+```{r FIltre QC}
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+ 
+ Ici, on souhaite éviter les cellules avec un très faible nombre de gènes (généralemetn des cellules vides/ ou des gouttes), celles avec un nombre très élevé (risque de doublons de cellules); Le % de lecture qui map avec le génome mitochondriale (dépend du type de tissu, mais un % élevé indique une mauvaise qualité de culture ou une cellule entrain de mourir).
+ 
+ Pour définir le seuil de nFeature_RNA min, on utilise en générale Q1-1,5IQR ou le seuil bas du mode principale. Lorsque l'on utilise les graphes, on cherche a enlever un amas en bas à gauche avec une discontinuité claire. 
+ 
+ Pour le seuil de nFeature_RNA max, le seuil doit exclure les cellules qui casse la linéarité, il ne doit pas exclure trop de cellules (On peut se baser sur le top 1 à 2% des valeurs ou Q3 +1,5IQR)
+ Pour le seuil mitochondriale, on se base sur un violin plot où assimilé et prennont le seuil ou la densité chute fortement (en générale µ + 2sd)
+ 
+ 
+ 
+ **On revisualise les résultats afin de regarder si les seuils suppriment des celluels simialires et si il n'y a pas de modifications des clsuters de la PCA.**
+ 
+#### Normalisation des données
+
+```{r normalisation}
+pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+  On utilise LogNormalize lorsque l'on suppose que les différences de profondeur sont le biais principale et que la majorité des gènes ne change pas d'une cellule à l'autre. Sinon, on peut utilsier la méthode **SCTransform** (réduit le bruit technique, pour les datasets hétérogènes, permet l'intégration multi-échantillons).
+  Pour le scale factor, on essaye de prendre un ordre de grandeur proche de la médiane (dépend de la technologie de séquançage), mais il n'a pas d'imapct fort sur le reste
+  
+  
+##### Calcul des gènes les plus variables
+
+```{r gènes les plsu variables }
+pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(pbmc), 10)
+
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE, nudge = 0, ynudge = 0)
+plot2
+```
+
+  On cherche ici quelles sont les gènes qui varient le plus d'une cellule à l'autre (très éxprimé dans certaines et très peu dans d'autres), facilitant ensuite l'analyse de la PCA. La méthode vst est la plus courante et robuste; on utilise mean.var.plot pour reproduire des analyses anciennes.Le nFeatures varie entre 1000 et 5000 selon la taille du dataset. On compare ensite la strucure de la PCA jusqu'à ce qu'elle soit stable. On peut égalemetn choisir le nombre de nom de gène affichés
+  
+  **SI SCTransform a été utilisé, les gènes les plus variables ont déja été calculé**
+  
+#### Scaling des données 
+
+```{r scaling}
+all.genes <- rownames(pbmc)
+pbmc <- ScaleData(pbmc, features = all.genes)
+```
+  
+Cette étape est l'étape final de préparation à la PCA
+
+#### Visualisation 
+
+
+```{r pca}
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+```
+
+
+
+```{r pca sur plan}
+DimPlot(pbmc, reduction = "pca")
+```
+
+Ce graphe permet de visualiser les 2 premières dimension de la PCA
+
+```{r heatmpa}
+DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE)
+
+
+
+```
+
+Cela permet de voir quelles sont les gènes les plus explciatifs des premières dimensions de la PCA. Pour savoir combien de dimension garder, on peut utiliser 2 méthodes : JAckStrawPlot (très efficace et précis, mais coûteux en temps de calcul) ou ElbowPlot
+
+##### JackStraw
+
+```{r Jackstraw}
+pbmc <- JackStraw(pbmc, num.replicate = 100)
+pbmc <- ScoreJackStraw(pbmc, dims = 1:20)
+
+JackStrawPlot(pbmc, dims = 1:15)
+```
+
+Le nombre de dimension dépend du dataset entre 15 et 40. On ne garde que les dimensions les plus éxplicatives (p-values faibles)
+
+##### ElbowPlot
+
+```{r Elbow}
+
+ElbowPlot(pbmc)
+
+```
+
+On peut noter que les dernière dimensions peuvent donnée des informations pour les spécialistes permettant d'identifier des clusters rares de certaines cellules.
+
+#### Clustering
+
+```{r Knn}
+
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+pbmc <- FindClusters(pbmc, resolution = 0.5, algorithm = 1)
+
+
+```
+
+On peut refaire ce clsutering autant de fosi que nécessaire en changeant le nombre de dimension gardé.
+La resolution est comprise entre 0,4 et 1,2 pour 3000 cellules. Plus on augmente ce chiffre, plus on augmetne le nombre de clusters. Pour des datasets larges, il faut augmenter la résolution.
+On peut sélectionner l'algorithme que l'on shoauite (Louvain ou SLM; voir [ici](https://satijalab.org/seurat/reference/findclusters) )
+
+##### Visualisation
+
+On va utiliser une UMAP pour **aider** à identifier les différent type cellulaires.
+
+```{r UMAP}
+pbmc <- RunUMAP(pbmc, dims = 1:10)
+DimPlot(pbmc, reduction = "umap")
+```
+
+##### Sauvegarde des Premiers résultats
+
+Ces précédentes étapes étaient intenses en calculs, on sauve donc le résultat quelque aprt pour ne plus avoir à le refaire.
+
+```{r sauvegarde}
+# saveRDS(pbmc, file = "../output/pbmc_tutorial.rds")
+```
+
+#### Identifications des cellules
+##### Identification des Biomarkers différentiellement exprimés
+
+###### Identification d'un cluster
+
+
+Pour distinguer le cluster 2 par exemple (différence avec tout les autres)
+```{r marqueurs clsuter}
+
+
+cluster2.markers <- FindMarkers(pbmc, ident.1 = 2)
+head(cluster2.markers, n = 5)
+```
+On peut utiliser différente méthode de calcul (wilcoxon apr défault ou bien roc avec test.use = "roc", ou encore DESeq2 voir [ici](https://satijalab.org/seurat/reference/findmarkers))
+
+
+
+Pour distinguer le cluster 5 par exemple du cluster 0 et 3
+
+```{r différence entre certains clsuter}
+cluster5.markers <- FindMarkers(pbmc, ident.1 = 5, ident.2 = c(0, 3))
+head(cluster5.markers, n = 5)
+
+```
+
+
+
+
+
+Pour distinguer chaque marker de chaque cluster comparer au reste des cellules
+
+```{r différence entre tous les clsuter}
+pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, verbose=TRUE)
+pbmc.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+```
+
+
+Une fois les marqueurs obtenues, on peut les visualiser afin de pouvoir attribuer des types cellulaires à nos clusters.
+
+
+```{r plot de certains marquerus apr clsuter}
+VlnPlot(pbmc, features = c("MS4A1", "CD79A"))
+```
+
+Il suffit de remplacer par le nom de gènes d'intérêt.
+
+
+Pour les placer sur la UMAP :
+
+```{r marquerus sur la Umap}
+FeaturePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
+    "CD8A"))
+```
+
+
+Pour voir sur la Heatmap par cluster
+
+```{r heatmpa par clsuter }
+pbmc.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+DoHeatmap(pbmc, features = top10$gene) + NoLegend()
+```
+
+
+
+
+###### Remplacement du nom sur la UMAP
+
+```{r identification Umap}
+new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono",
+    "NK", "DC", "Platelet")
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+
+
+
+### Integration de plusierus dataset similaires (entre 2 conditions)
+
+voir [ici](https://satijalab.org/seurat/articles/integration_introduction)
+
+
+
+
+
+
+
+## ORA et GSEA
+
+Récupération du fichier gene_pathways depuis github.
+
+```{r}
+data <- read.delim("https://raw.githubusercontent.com/brockern/RNAseq_LBFA_V1/main/Gene_pathways.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+```
+
+
+### ORA
+
+### GSEA
+
+
+
+
+
+
+# Session Info 
+```{r session info}
+session_info_to_csv <- function(file = "session.info.csv") {
+  si <- sessionInfo()
+
+  # General R info
+  general <- data.frame(
+    section = "R",
+    name    = c("R.version", "Platform", "OS", "Locale"),
+    value   = c(
+      si$R.version$version.string,
+      si$platform,
+      paste(Sys.info()[c("sysname", "release")], collapse = " "),
+      Sys.getlocale()
+    ),
+    stringsAsFactors = FALSE
+  )
+
+  # Loaded packages (otherPkgs is a named list of packageDescription-like lists)
+  loaded <- if (length(si$otherPkgs) > 0) {
+    data.frame(
+      section = "loaded_package",
+      name    = names(si$otherPkgs),
+      value   = sapply(si$otherPkgs, function(p) p$Version),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    data.frame(section = character(), name = character(), value = character(),
+               stringsAsFactors = FALSE)
+  }
+
+  # Base packages (basePkgs is simply a character vector)
+  base <- data.frame(
+    section = "base_package",
+    name    = si$basePkgs,
+    value   = NA_character_,
+    stringsAsFactors = FALSE
+  )
+
+  out <- rbind(general, loaded, base)
+  write.csv(out, file = file, row.names = FALSE)
+  invisible(out)  # good practice: return silently for use in pipes etc.
+}
+
+session_info_to_csv()
+```
+
