@@ -11,7 +11,7 @@ Setup
 ```{r setup, include=FALSE, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = FALSE)
 
-#rm(list = ls())
+rm(list = ls())
 set.seed(42)
 
 libs <- c("SummarizedExperiment", "DESeq2", "ExploreModelMatrix",
@@ -19,7 +19,7 @@ libs <- c("SummarizedExperiment", "DESeq2", "ExploreModelMatrix",
           "tidyverse", "Seurat", "fgsea", "cowplot", "reshape2",
           "corrplot", "clustree", "EnhancedVolcano",
           "clusterProfiler", "org.Mm.eg.db", "enrichplot", 
-          "msigdbr", "plotly", "openxlsx", "jsonlite", "httr")
+          "msigdbr", "plotly", "openxlsx", "jsonlite", "httr", "OmnipathR", "decoupleR", "pheatmap")
 
 # Installation de BiocManager si nécessaire
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
